@@ -176,10 +176,15 @@ def adapt(model, Xt, loss_fn, steps, batch_size, lr, seed):
 
 
 @torch.no_grad()
-def evaluate(model, Xt, yt, use_batch_stats):
+def evaluate(model, Xt, yt, use_batch_stats, score_fn="msp"):
     model.train(use_batch_stats)  # adapted models have no running stats -> batch stats
     fused, _ = model(Xt)
-    score = norm_entropy(fused).numpy()  # higher = more likely unknown
+    # Unknown-ness score (higher = more likely unknown). The paper's detector uses
+    # S(x) = MSP and flags S(x) < eta as unknown, so we negate MSP here.
+    if score_fn == "msp":
+        score = -fused.softmax(1).max(1).values.numpy()
+    else:
+        score = norm_entropy(fused).numpy()
     is_unk = (yt == -1).numpy()
     known = ~is_unk
 
@@ -201,6 +206,8 @@ def main():
     ap.add_argument("--steps", type=int, default=10, help="Passes over the target stream")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-2)
+    ap.add_argument("--score", choices=["msp", "entropy"], default="msp",
+                    help="Unknown-detection score S(x): max softmax prob (paper default) or entropy")
     args = ap.parse_args()
 
     names = ["Source-only", "Tent", "UAE only", "AEO"]
@@ -210,15 +217,15 @@ def main():
         (Xs, ys), (Xt, yt), K = make_domains(args.unknown_class, seed, args.shift)
         source = train_source(MultimodalNet(K), Xs, ys)
 
-        results["Source-only"].append(evaluate(source, Xt, yt, use_batch_stats=False))
+        results["Source-only"].append(evaluate(source, Xt, yt, use_batch_stats=False, score_fn=args.score))
         for name, fn in [("Tent", tent_loss),
                          ("UAE only", lambda f, u: aeo_loss(f, u, args.alpha, args.beta, lam_amp=0.0)),
                          ("AEO", lambda f, u: aeo_loss(f, u, args.alpha, args.beta))]:
             model = adapt(copy.deepcopy(source), Xt, fn, args.steps, args.batch_size, args.lr, seed)
-            results[name].append(evaluate(model, Xt, yt, use_batch_stats=True))
+            results[name].append(evaluate(model, Xt, yt, use_batch_stats=True, score_fn=args.score))
 
     cls = load_iris().target_names[args.unknown_class]
-    print(f"Unknown class: {cls} | shift={args.shift} | {args.seeds} seeds (mean ± std)\n")
+    print(f"Unknown class: {cls} | shift={args.shift} | score={args.score} | {args.seeds} seeds (mean ± std)\n")
     print(f"{'Method':<12} {'Known Acc ↑':>14} {'AUROC ↑':>14} {'FPR95 ↓':>14}")
     for n in names:
         r = np.array(results[n]) * 100
